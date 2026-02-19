@@ -1233,8 +1233,8 @@ function toggleNutritionColumns() {
 
 async function searchOpenFoodFacts(ingredientName) {
   try {
-    // Using API v2 with text search (better results)
-    const url = `https://world.openfoodfacts.org/api/v2/search?search_terms=${encodeURIComponent(ingredientName)}&fields=product_name,nutriments,image_url&page_size=5&sort_by=unique_scans_n`;
+    // Using API v2 with text search
+    const url = `https://world.openfoodfacts.org/api/v2/search?search_terms=${encodeURIComponent(ingredientName)}&fields=product_name,nutriments,image_url&page_size=20&sort_by=unique_scans_n`;
     
     console.log('Attempting OFF API v2 for:', ingredientName);
     
@@ -1259,13 +1259,25 @@ async function searchOpenFoodFacts(ingredientName) {
       return null;
     }
     
-    // Find first product with complete nutrition data
+    // Filter products by relevance (product name must contain search term)
+    const searchTerms = ingredientName.toLowerCase().split(' ');
+    const relevantProducts = data.products.filter(p => {
+      if (!p.product_name) return false;
+      const productName = p.product_name.toLowerCase();
+      // Product name must contain at least one search term
+      return searchTerms.some(term => term.length > 2 && productName.includes(term));
+    });
+    
+    console.log('Filtered to', relevantProducts.length, 'relevant products');
+    
+    // Find first relevant product with complete nutrition data
     let product = null;
-    for (const p of data.products) {
+    for (const p of relevantProducts) {
       if (p.nutriments) {
         const hasKcal = p.nutriments['energy-kcal_100g'] || p.nutriments['energy-kcal'];
         const hasFat = p.nutriments['fat_100g'] || p.nutriments.fat;
-        if (hasKcal || hasFat) {
+        const hasProt = p.nutriments['proteins_100g'] || p.nutriments.proteins;
+        if (hasKcal || hasFat || hasProt) {
           product = p;
           console.log('Selected product:', p.product_name, 'with nutriments:', p.nutriments);
           break;
@@ -1274,7 +1286,7 @@ async function searchOpenFoodFacts(ingredientName) {
     }
     
     if (!product) {
-      console.log('No product with nutrition data found');
+      console.log('No relevant product with nutrition data found');
       return null;
     }
     

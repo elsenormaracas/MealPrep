@@ -1233,30 +1233,46 @@ function toggleNutritionColumns() {
 
 async function searchOpenFoodFacts(ingredientName) {
   try {
-    // Using fr.openfoodfacts.org which has better CORS support
-    const url = `https://fr.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(ingredientName)}&search_simple=1&action=process&json=1&page_size=3&fields=product_name,nutriments,image_url`;
-    const response = await fetch(url, {
+    // Try API v2 first (better CORS support)
+    const url = `https://world.openfoodfacts.org/api/v2/search?categories_tags_en=en:${encodeURIComponent(ingredientName)}&fields=product_name,nutriments,image_url&page_size=3`;
+    
+    console.log('Attempting OFF API v2 for:', ingredientName);
+    
+    let response = await fetch(url, {
       method: 'GET',
+      mode: 'cors',
       headers: {
-        'User-Agent': 'MealPrep - Nutrition Tracker'
+        'Accept': 'application/json'
       }
     });
+    
+    // If v2 fails, try with CORS proxy
+    if (!response.ok) {
+      console.log('API v2 failed, trying CORS proxy...');
+      const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent('https://fr.openfoodfacts.org/cgi/search.pl?search_terms=' + encodeURIComponent(ingredientName) + '&search_simple=1&action=process&json=1&page_size=3&fields=product_name,nutriments,image_url')}`;
+      response = await fetch(proxyUrl);
+    }
+    
     if (!response.ok) {
       console.log('OFF API response not OK:', response.status);
       return null;
     }
+    
     const data = await response.json();
     console.log('OFF API response for', ingredientName, ':', data);
     
-    if (!data.products || !data.products.length) return null;
+    if (!data.products || !data.products.length) {
+      console.log('No products found');
+      return null;
+    }
     
     // Try to find best match (first product with complete nutrition data)
-    let product = data.products.find(p => p.nutriments && p.nutriments['energy-kcal_100g']);
+    let product = data.products.find(p => p.nutriments && (p.nutriments['energy-kcal_100g'] || p.nutriments['energy-kcal']));
     if (!product) product = data.products[0];
     
     const n = product.nutriments || {};
     
-    return {
+    const result = {
       calories: n['energy-kcal_100g'] || n['energy-kcal'] || null,
       proteins: n['proteins_100g'] || n.proteins || null,
       carbohydrates: n['carbohydrates_100g'] || n.carbohydrates || null,
@@ -1264,6 +1280,9 @@ async function searchOpenFoodFacts(ingredientName) {
       fiber: n['fiber_100g'] || n.fiber || null,
       image_url: product.image_url || null,
     };
+    
+    console.log('Extracted nutrition:', result);
+    return result;
   } catch (error) {
     console.error('OpenFoodFacts error:', error);
     return null;

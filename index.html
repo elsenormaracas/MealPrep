@@ -1231,105 +1231,246 @@ function toggleNutritionColumns() {
   console.log('Nutrition columns toggled:', showNutritionCols);
 }
 
-async function searchOpenFoodFacts(ingredientName) {
-  try {
-    // Using API v2 with text search
-    const url = `https://world.openfoodfacts.org/api/v2/search?search_terms=${encodeURIComponent(ingredientName)}&fields=product_name,nutriments,image_url&page_size=20&sort_by=unique_scans_n`;
-    
-    console.log('Attempting OFF API v2 for:', ingredientName);
-    
-    const response = await fetch(url, {
-      method: 'GET',
-      mode: 'cors',
-      headers: {
-        'Accept': 'application/json'
-      }
-    });
-    
-    if (!response.ok) {
-      console.log('OFF API response not OK:', response.status);
-      return null;
-    }
-    
-    const data = await response.json();
-    console.log('OFF API raw response for', ingredientName, ':', data);
-    
-    if (!data.products || !data.products.length) {
-      console.log('No products found');
-      return null;
-    }
-    
-    // Filter products by relevance (product name must contain search term)
-    const searchTerms = ingredientName.toLowerCase().split(' ');
-    const relevantProducts = data.products.filter(p => {
-      if (!p.product_name) return false;
-      const productName = p.product_name.toLowerCase();
-      // Product name must contain at least one search term
-      return searchTerms.some(term => term.length > 2 && productName.includes(term));
-    });
-    
-    console.log('Filtered to', relevantProducts.length, 'relevant products');
-    
-    // Find first relevant product with complete nutrition data
-    let product = null;
-    for (const p of relevantProducts) {
-      if (p.nutriments) {
-        const hasKcal = p.nutriments['energy-kcal_100g'] || p.nutriments['energy-kcal'];
-        const hasFat = p.nutriments['fat_100g'] || p.nutriments.fat;
-        const hasProt = p.nutriments['proteins_100g'] || p.nutriments.proteins;
-        if (hasKcal || hasFat || hasProt) {
-          product = p;
-          console.log('Selected product:', p.product_name, 'with nutriments:', p.nutriments);
-          break;
-        }
-      }
-    }
-    
-    if (!product) {
-      console.log('No relevant product with nutrition data found');
-      return null;
-    }
-    
-    const n = product.nutriments || {};
-    
-    const result = {
-      calories: n['energy-kcal_100g'] || n['energy-kcal'] || null,
-      proteins: n['proteins_100g'] || n.proteins || null,
-      carbohydrates: n['carbohydrates_100g'] || n.carbohydrates || null,
-      fats: n['fat_100g'] || n.fat || null,
-      fiber: n['fiber_100g'] || n.fiber || null,
-      image_url: product.image_url || null,
-    };
-    
-    console.log('Extracted nutrition for', product.product_name, ':', result);
-    return result;
-  } catch (error) {
-    console.error('OpenFoodFacts error:', error);
-    return null;
-  }
-}
-
-// Standard weights for common unit-based ingredients (in grams)
-const STANDARD_UNIT_WEIGHTS = {
-  'oeuf': 60, 'oeufs': 60, 'œuf': 60, 'œufs': 60,
-  'oignon': 150, 'oignons': 150,
-  'pomme de terre': 200, 'pommes de terre': 200,
-  'tomate': 120, 'tomates': 120,
-  'carotte': 100, 'carottes': 100,
-  'courgette': 250, 'courgettes': 250,
-  'aubergine': 300, 'aubergines': 300,
-  'poivron': 150, 'poivrons': 150,
-  'citron': 100, 'citrons': 100,
-  'pomme': 150, 'pommes': 150,
-  'banane': 120, 'bananes': 120,
-  'orange': 150, 'oranges': 150,
-  'gousse d\'ail': 5, 'gousses d\'ail': 5,
-  'échalote': 30, 'échalotes': 30,
+// ─────────────────────────────────────────────────────
+// LOCAL NUTRITION DATABASE (~150 ingrédients)
+// ─────────────────────────────────────────────────────
+const NUTRITION_DB = {
+  "huile d'olive": { calories: 900, proteins: 0, carbohydrates: 0, fats: 100, fiber: 0, unit_weight: null },
+  "huile de tournesol": { calories: 900, proteins: 0, carbohydrates: 0, fats: 100, fiber: 0, unit_weight: null },
+  "huile de colza": { calories: 900, proteins: 0, carbohydrates: 0, fats: 100, fiber: 0, unit_weight: null },
+  "huile de coco": { calories: 892, proteins: 0, carbohydrates: 0, fats: 99.1, fiber: 0, unit_weight: null },
+  "huile": { calories: 900, proteins: 0, carbohydrates: 0, fats: 100, fiber: 0, unit_weight: null },
+  "beurre": { calories: 717, proteins: 0.9, carbohydrates: 0.1, fats: 81, fiber: 0, unit_weight: null },
+  "margarine": { calories: 720, proteins: 0.5, carbohydrates: 0.4, fats: 80, fiber: 0, unit_weight: null },
+  "lait entier": { calories: 64, proteins: 3.2, carbohydrates: 4.8, fats: 3.5, fiber: 0, unit_weight: null },
+  "lait demi-écrémé": { calories: 46, proteins: 3.2, carbohydrates: 4.8, fats: 1.5, fiber: 0, unit_weight: null },
+  "lait écrémé": { calories: 34, proteins: 3.4, carbohydrates: 5, fats: 0.1, fiber: 0, unit_weight: null },
+  "lait": { calories: 64, proteins: 3.2, carbohydrates: 4.8, fats: 3.5, fiber: 0, unit_weight: null },
+  "crème fraîche": { calories: 300, proteins: 2.5, carbohydrates: 3, fats: 30, fiber: 0, unit_weight: null },
+  "crème liquide": { calories: 337, proteins: 2.1, carbohydrates: 3.1, fats: 35, fiber: 0, unit_weight: null },
+  "crème": { calories: 300, proteins: 2.5, carbohydrates: 3, fats: 30, fiber: 0, unit_weight: null },
+  "yaourt nature": { calories: 61, proteins: 3.5, carbohydrates: 4.5, fats: 3.3, fiber: 0, unit_weight: 125 },
+  "yaourt": { calories: 61, proteins: 3.5, carbohydrates: 4.5, fats: 3.3, fiber: 0, unit_weight: 125 },
+  "fromage blanc 0%": { calories: 47, proteins: 7.5, carbohydrates: 4.5, fats: 0.2, fiber: 0, unit_weight: null },
+  "fromage blanc 20%": { calories: 80, proteins: 7.3, carbohydrates: 6.1, fats: 3, fiber: 0, unit_weight: null },
+  "fromage blanc": { calories: 80, proteins: 7.3, carbohydrates: 6.1, fats: 3, fiber: 0, unit_weight: null },
+  "emmental": { calories: 382, proteins: 28.5, carbohydrates: 0.4, fats: 29.7, fiber: 0, unit_weight: null },
+  "gruyère": { calories: 413, proteins: 29.8, carbohydrates: 0.4, fats: 32.3, fiber: 0, unit_weight: null },
+  "parmesan": { calories: 392, proteins: 35.8, carbohydrates: 0.9, fats: 26, fiber: 0, unit_weight: null },
+  "mozzarella": { calories: 280, proteins: 18.6, carbohydrates: 2.2, fats: 22.4, fiber: 0, unit_weight: 125 },
+  "chèvre": { calories: 210, proteins: 13, carbohydrates: 2.5, fats: 16, fiber: 0, unit_weight: null },
+  "roquefort": { calories: 369, proteins: 19.7, carbohydrates: 2, fats: 32.9, fiber: 0, unit_weight: null },
+  "camembert": { calories: 299, proteins: 19.8, carbohydrates: 0.5, fats: 24.3, fiber: 0, unit_weight: null },
+  "brie": { calories: 334, proteins: 20.8, carbohydrates: 0.5, fats: 27.7, fiber: 0, unit_weight: null },
+  "fromage": { calories: 350, proteins: 25, carbohydrates: 1, fats: 28, fiber: 0, unit_weight: null },
+  "œuf": { calories: 145, proteins: 13, carbohydrates: 1, fats: 10, fiber: 0, unit_weight: 60 },
+  "oeuf": { calories: 145, proteins: 13, carbohydrates: 1, fats: 10, fiber: 0, unit_weight: 60 },
+  "oeufs": { calories: 145, proteins: 13, carbohydrates: 1, fats: 10, fiber: 0, unit_weight: 60 },
+  "œufs": { calories: 145, proteins: 13, carbohydrates: 1, fats: 10, fiber: 0, unit_weight: 60 },
+  "blanc d'œuf": { calories: 52, proteins: 10.9, carbohydrates: 0.7, fats: 0.2, fiber: 0, unit_weight: 33 },
+  "jaune d'œuf": { calories: 322, proteins: 16.1, carbohydrates: 0.6, fats: 26.5, fiber: 0, unit_weight: 17 },
+  "poulet": { calories: 165, proteins: 31, carbohydrates: 0, fats: 3.6, fiber: 0, unit_weight: null },
+  "dinde": { calories: 135, proteins: 29, carbohydrates: 0, fats: 1.5, fiber: 0, unit_weight: null },
+  "bœuf": { calories: 250, proteins: 26, carbohydrates: 0, fats: 17, fiber: 0, unit_weight: null },
+  "boeuf": { calories: 250, proteins: 26, carbohydrates: 0, fats: 17, fiber: 0, unit_weight: null },
+  "bœuf haché 5%": { calories: 137, proteins: 21.4, carbohydrates: 0, fats: 5.1, fiber: 0, unit_weight: null },
+  "bœuf haché 15%": { calories: 220, proteins: 19.4, carbohydrates: 0, fats: 15, fiber: 0, unit_weight: null },
+  "viande hachée": { calories: 220, proteins: 19.4, carbohydrates: 0, fats: 15, fiber: 0, unit_weight: null },
+  "steak haché": { calories: 220, proteins: 19.4, carbohydrates: 0, fats: 15, fiber: 0, unit_weight: null },
+  "porc": { calories: 242, proteins: 27.3, carbohydrates: 0, fats: 14, fiber: 0, unit_weight: null },
+  "jambon blanc": { calories: 115, proteins: 20.9, carbohydrates: 0.5, fats: 3, fiber: 0, unit_weight: null },
+  "jambon": { calories: 115, proteins: 20.9, carbohydrates: 0.5, fats: 3, fiber: 0, unit_weight: null },
+  "jambon cru": { calories: 146, proteins: 26.9, carbohydrates: 0.1, fats: 3.7, fiber: 0, unit_weight: null },
+  "bacon": { calories: 541, proteins: 37, carbohydrates: 1.4, fats: 42, fiber: 0, unit_weight: null },
+  "lardons": { calories: 541, proteins: 37, carbohydrates: 1.4, fats: 42, fiber: 0, unit_weight: null },
+  "saucisse": { calories: 301, proteins: 13, carbohydrates: 1, fats: 27, fiber: 0, unit_weight: 80 },
+  "agneau": { calories: 294, proteins: 25, carbohydrates: 0, fats: 21, fiber: 0, unit_weight: null },
+  "veau": { calories: 172, proteins: 31, carbohydrates: 0, fats: 4.7, fiber: 0, unit_weight: null },
+  "saumon": { calories: 208, proteins: 20, carbohydrates: 0, fats: 13, fiber: 0, unit_weight: null },
+  "thon": { calories: 144, proteins: 23.3, carbohydrates: 0, fats: 4.9, fiber: 0, unit_weight: null },
+  "cabillaud": { calories: 82, proteins: 18, carbohydrates: 0, fats: 0.7, fiber: 0, unit_weight: null },
+  "colin": { calories: 82, proteins: 18, carbohydrates: 0, fats: 0.7, fiber: 0, unit_weight: null },
+  "sole": { calories: 86, proteins: 18.8, carbohydrates: 0, fats: 1.2, fiber: 0, unit_weight: null },
+  "truite": { calories: 119, proteins: 19.9, carbohydrates: 0, fats: 4.3, fiber: 0, unit_weight: null },
+  "sardine": { calories: 208, proteins: 24.6, carbohydrates: 0, fats: 11.5, fiber: 0, unit_weight: 40 },
+  "maquereau": { calories: 205, proteins: 18.6, carbohydrates: 0, fats: 13.9, fiber: 0, unit_weight: null },
+  "crevette": { calories: 99, proteins: 20.9, carbohydrates: 0.9, fats: 1.7, fiber: 0, unit_weight: 10 },
+  "crevettes": { calories: 99, proteins: 20.9, carbohydrates: 0.9, fats: 1.7, fiber: 0, unit_weight: 10 },
+  "poisson": { calories: 120, proteins: 20, carbohydrates: 0, fats: 4, fiber: 0, unit_weight: null },
+  "tomate": { calories: 18, proteins: 0.9, carbohydrates: 3.9, fats: 0.2, fiber: 1.2, unit_weight: 120 },
+  "tomates": { calories: 18, proteins: 0.9, carbohydrates: 3.9, fats: 0.2, fiber: 1.2, unit_weight: 120 },
+  "concombre": { calories: 15, proteins: 0.7, carbohydrates: 3.6, fats: 0.1, fiber: 0.5, unit_weight: 300 },
+  "salade": { calories: 15, proteins: 1.4, carbohydrates: 2.9, fats: 0.2, fiber: 1.3, unit_weight: null },
+  "laitue": { calories: 15, proteins: 1.4, carbohydrates: 2.9, fats: 0.2, fiber: 1.3, unit_weight: null },
+  "carotte": { calories: 41, proteins: 0.9, carbohydrates: 9.6, fats: 0.2, fiber: 2.8, unit_weight: 100 },
+  "carottes": { calories: 41, proteins: 0.9, carbohydrates: 9.6, fats: 0.2, fiber: 2.8, unit_weight: 100 },
+  "courgette": { calories: 17, proteins: 1.2, carbohydrates: 3.1, fats: 0.3, fiber: 1, unit_weight: 250 },
+  "courgettes": { calories: 17, proteins: 1.2, carbohydrates: 3.1, fats: 0.3, fiber: 1, unit_weight: 250 },
+  "aubergine": { calories: 25, proteins: 1, carbohydrates: 5.9, fats: 0.2, fiber: 3, unit_weight: 300 },
+  "aubergines": { calories: 25, proteins: 1, carbohydrates: 5.9, fats: 0.2, fiber: 3, unit_weight: 300 },
+  "poivron": { calories: 26, proteins: 0.9, carbohydrates: 6.3, fats: 0.3, fiber: 2.1, unit_weight: 150 },
+  "poivrons": { calories: 26, proteins: 0.9, carbohydrates: 6.3, fats: 0.3, fiber: 2.1, unit_weight: 150 },
+  "oignon": { calories: 40, proteins: 1.1, carbohydrates: 9.3, fats: 0.1, fiber: 1.7, unit_weight: 150 },
+  "oignons": { calories: 40, proteins: 1.1, carbohydrates: 9.3, fats: 0.1, fiber: 1.7, unit_weight: 150 },
+  "échalote": { calories: 72, proteins: 2.5, carbohydrates: 16.8, fats: 0.1, fiber: 3.2, unit_weight: 30 },
+  "echalote": { calories: 72, proteins: 2.5, carbohydrates: 16.8, fats: 0.1, fiber: 3.2, unit_weight: 30 },
+  "échalotes": { calories: 72, proteins: 2.5, carbohydrates: 16.8, fats: 0.1, fiber: 3.2, unit_weight: 30 },
+  "ail": { calories: 149, proteins: 6.4, carbohydrates: 33.1, fats: 0.5, fiber: 2.1, unit_weight: null },
+  "gousse d'ail": { calories: 149, proteins: 6.4, carbohydrates: 33.1, fats: 0.5, fiber: 2.1, unit_weight: 5 },
+  "gousses d'ail": { calories: 149, proteins: 6.4, carbohydrates: 33.1, fats: 0.5, fiber: 2.1, unit_weight: 5 },
+  "pomme de terre": { calories: 77, proteins: 2, carbohydrates: 17, fats: 0.1, fiber: 2.2, unit_weight: 200 },
+  "pommes de terre": { calories: 77, proteins: 2, carbohydrates: 17, fats: 0.1, fiber: 2.2, unit_weight: 200 },
+  "patate": { calories: 77, proteins: 2, carbohydrates: 17, fats: 0.1, fiber: 2.2, unit_weight: 200 },
+  "patate douce": { calories: 86, proteins: 1.6, carbohydrates: 20.1, fats: 0.1, fiber: 3, unit_weight: 200 },
+  "brocoli": { calories: 34, proteins: 2.8, carbohydrates: 7, fats: 0.4, fiber: 2.6, unit_weight: null },
+  "chou-fleur": { calories: 25, proteins: 1.9, carbohydrates: 5, fats: 0.3, fiber: 2, unit_weight: null },
+  "chou": { calories: 25, proteins: 1.3, carbohydrates: 5.8, fats: 0.1, fiber: 2.5, unit_weight: null },
+  "épinard": { calories: 23, proteins: 2.9, carbohydrates: 3.6, fats: 0.4, fiber: 2.2, unit_weight: null },
+  "epinard": { calories: 23, proteins: 2.9, carbohydrates: 3.6, fats: 0.4, fiber: 2.2, unit_weight: null },
+  "épinards": { calories: 23, proteins: 2.9, carbohydrates: 3.6, fats: 0.4, fiber: 2.2, unit_weight: null },
+  "haricot vert": { calories: 31, proteins: 1.8, carbohydrates: 7, fats: 0.2, fiber: 2.7, unit_weight: null },
+  "haricots verts": { calories: 31, proteins: 1.8, carbohydrates: 7, fats: 0.2, fiber: 2.7, unit_weight: null },
+  "petit pois": { calories: 81, proteins: 5.4, carbohydrates: 14.5, fats: 0.4, fiber: 5.1, unit_weight: null },
+  "petits pois": { calories: 81, proteins: 5.4, carbohydrates: 14.5, fats: 0.4, fiber: 5.1, unit_weight: null },
+  "champignon": { calories: 22, proteins: 3.1, carbohydrates: 3.3, fats: 0.3, fiber: 1, unit_weight: 20 },
+  "champignons": { calories: 22, proteins: 3.1, carbohydrates: 3.3, fats: 0.3, fiber: 1, unit_weight: 20 },
+  "avocat": { calories: 160, proteins: 2, carbohydrates: 8.5, fats: 14.7, fiber: 6.7, unit_weight: 200 },
+  "betterave": { calories: 43, proteins: 1.6, carbohydrates: 9.6, fats: 0.2, fiber: 2.8, unit_weight: 150 },
+  "céleri": { calories: 14, proteins: 0.7, carbohydrates: 3, fats: 0.2, fiber: 1.6, unit_weight: null },
+  "celeri": { calories: 14, proteins: 0.7, carbohydrates: 3, fats: 0.2, fiber: 1.6, unit_weight: null },
+  "poireau": { calories: 61, proteins: 1.5, carbohydrates: 14.2, fats: 0.3, fiber: 1.8, unit_weight: 200 },
+  "poireaux": { calories: 61, proteins: 1.5, carbohydrates: 14.2, fats: 0.3, fiber: 1.8, unit_weight: 200 },
+  "navet": { calories: 28, proteins: 0.9, carbohydrates: 6.4, fats: 0.1, fiber: 1.8, unit_weight: 150 },
+  "radis": { calories: 16, proteins: 0.7, carbohydrates: 3.4, fats: 0.1, fiber: 1.6, unit_weight: 15 },
+  "pomme": { calories: 52, proteins: 0.3, carbohydrates: 14, fats: 0.2, fiber: 2.4, unit_weight: 150 },
+  "pommes": { calories: 52, proteins: 0.3, carbohydrates: 14, fats: 0.2, fiber: 2.4, unit_weight: 150 },
+  "banane": { calories: 89, proteins: 1.1, carbohydrates: 22.8, fats: 0.3, fiber: 2.6, unit_weight: 120 },
+  "bananes": { calories: 89, proteins: 1.1, carbohydrates: 22.8, fats: 0.3, fiber: 2.6, unit_weight: 120 },
+  "orange": { calories: 47, proteins: 0.9, carbohydrates: 11.8, fats: 0.1, fiber: 2.4, unit_weight: 150 },
+  "oranges": { calories: 47, proteins: 0.9, carbohydrates: 11.8, fats: 0.1, fiber: 2.4, unit_weight: 150 },
+  "citron": { calories: 29, proteins: 1.1, carbohydrates: 9.3, fats: 0.3, fiber: 2.8, unit_weight: 100 },
+  "citrons": { calories: 29, proteins: 1.1, carbohydrates: 9.3, fats: 0.3, fiber: 2.8, unit_weight: 100 },
+  "poire": { calories: 57, proteins: 0.4, carbohydrates: 15.2, fats: 0.1, fiber: 3.1, unit_weight: 150 },
+  "poires": { calories: 57, proteins: 0.4, carbohydrates: 15.2, fats: 0.1, fiber: 3.1, unit_weight: 150 },
+  "fraise": { calories: 32, proteins: 0.7, carbohydrates: 7.7, fats: 0.3, fiber: 2, unit_weight: 12 },
+  "fraises": { calories: 32, proteins: 0.7, carbohydrates: 7.7, fats: 0.3, fiber: 2, unit_weight: 12 },
+  "framboise": { calories: 52, proteins: 1.2, carbohydrates: 11.9, fats: 0.7, fiber: 6.5, unit_weight: 5 },
+  "framboises": { calories: 52, proteins: 1.2, carbohydrates: 11.9, fats: 0.7, fiber: 6.5, unit_weight: 5 },
+  "myrtille": { calories: 57, proteins: 0.7, carbohydrates: 14.5, fats: 0.3, fiber: 2.4, unit_weight: 2 },
+  "myrtilles": { calories: 57, proteins: 0.7, carbohydrates: 14.5, fats: 0.3, fiber: 2.4, unit_weight: 2 },
+  "kiwi": { calories: 61, proteins: 1.1, carbohydrates: 14.7, fats: 0.5, fiber: 3, unit_weight: 100 },
+  "kiwis": { calories: 61, proteins: 1.1, carbohydrates: 14.7, fats: 0.5, fiber: 3, unit_weight: 100 },
+  "mangue": { calories: 60, proteins: 0.8, carbohydrates: 15, fats: 0.4, fiber: 1.6, unit_weight: 300 },
+  "ananas": { calories: 50, proteins: 0.5, carbohydrates: 13.1, fats: 0.1, fiber: 1.4, unit_weight: null },
+  "pêche": { calories: 39, proteins: 0.9, carbohydrates: 9.5, fats: 0.3, fiber: 1.5, unit_weight: 150 },
+  "peche": { calories: 39, proteins: 0.9, carbohydrates: 9.5, fats: 0.3, fiber: 1.5, unit_weight: 150 },
+  "pêches": { calories: 39, proteins: 0.9, carbohydrates: 9.5, fats: 0.3, fiber: 1.5, unit_weight: 150 },
+  "abricot": { calories: 48, proteins: 1.4, carbohydrates: 11.1, fats: 0.4, fiber: 2, unit_weight: 40 },
+  "abricots": { calories: 48, proteins: 1.4, carbohydrates: 11.1, fats: 0.4, fiber: 2, unit_weight: 40 },
+  "raisin": { calories: 69, proteins: 0.7, carbohydrates: 18.1, fats: 0.2, fiber: 0.9, unit_weight: null },
+  "melon": { calories: 34, proteins: 0.8, carbohydrates: 8.2, fats: 0.2, fiber: 0.9, unit_weight: 1500 },
+  "pastèque": { calories: 30, proteins: 0.6, carbohydrates: 7.6, fats: 0.2, fiber: 0.4, unit_weight: null },
+  "pasteque": { calories: 30, proteins: 0.6, carbohydrates: 7.6, fats: 0.2, fiber: 0.4, unit_weight: null },
+  "farine": { calories: 364, proteins: 10, carbohydrates: 76, fats: 1, fiber: 3.5, unit_weight: null },
+  "farine de blé": { calories: 364, proteins: 10, carbohydrates: 76, fats: 1, fiber: 3.5, unit_weight: null },
+  "farine complète": { calories: 340, proteins: 11.5, carbohydrates: 72, fats: 2.5, fiber: 10.7, unit_weight: null },
+  "riz": { calories: 130, proteins: 2.7, carbohydrates: 28.2, fats: 0.3, fiber: 0.4, unit_weight: null },
+  "riz blanc": { calories: 130, proteins: 2.7, carbohydrates: 28.2, fats: 0.3, fiber: 0.4, unit_weight: null },
+  "riz complet": { calories: 111, proteins: 2.6, carbohydrates: 23, fats: 0.9, fiber: 1.8, unit_weight: null },
+  "riz basmati": { calories: 130, proteins: 2.7, carbohydrates: 28.2, fats: 0.3, fiber: 0.4, unit_weight: null },
+  "pâtes": { calories: 371, proteins: 13, carbohydrates: 74, fats: 1.5, fiber: 3.2, unit_weight: null },
+  "pates": { calories: 371, proteins: 13, carbohydrates: 74, fats: 1.5, fiber: 3.2, unit_weight: null },
+  "pâtes complètes": { calories: 348, proteins: 13.4, carbohydrates: 71.2, fats: 2.9, fiber: 8.4, unit_weight: null },
+  "spaghetti": { calories: 371, proteins: 13, carbohydrates: 74, fats: 1.5, fiber: 3.2, unit_weight: null },
+  "macaroni": { calories: 371, proteins: 13, carbohydrates: 74, fats: 1.5, fiber: 3.2, unit_weight: null },
+  "quinoa": { calories: 120, proteins: 4.4, carbohydrates: 21.3, fats: 1.9, fiber: 2.8, unit_weight: null },
+  "boulgour": { calories: 83, proteins: 3.1, carbohydrates: 18.6, fats: 0.2, fiber: 4.5, unit_weight: null },
+  "couscous": { calories: 112, proteins: 3.8, carbohydrates: 23.2, fats: 0.2, fiber: 1.4, unit_weight: null },
+  "pain": { calories: 265, proteins: 9, carbohydrates: 49, fats: 3.2, fiber: 3.5, unit_weight: null },
+  "pain blanc": { calories: 265, proteins: 9, carbohydrates: 49, fats: 3.2, fiber: 3.5, unit_weight: null },
+  "pain complet": { calories: 247, proteins: 9.2, carbohydrates: 48.5, fats: 3.5, fiber: 7.4, unit_weight: null },
+  "biscottes": { calories: 394, proteins: 11, carbohydrates: 75, fats: 5, fiber: 4.5, unit_weight: 10 },
+  "flocons d'avoine": { calories: 389, proteins: 13.2, carbohydrates: 66.3, fats: 7, fiber: 10.6, unit_weight: null },
+  "avoine": { calories: 389, proteins: 13.2, carbohydrates: 66.3, fats: 7, fiber: 10.6, unit_weight: null },
+  "maïzena": { calories: 381, proteins: 0.3, carbohydrates: 91, fats: 0.1, fiber: 0, unit_weight: null },
+  "fecule": { calories: 381, proteins: 0.3, carbohydrates: 91, fats: 0.1, fiber: 0, unit_weight: null },
+  "semoule": { calories: 360, proteins: 12.7, carbohydrates: 72.8, fats: 1.1, fiber: 3.9, unit_weight: null },
+  "lentilles": { calories: 116, proteins: 9, carbohydrates: 20.1, fats: 0.4, fiber: 7.9, unit_weight: null },
+  "pois chiches": { calories: 164, proteins: 8.9, carbohydrates: 27.4, fats: 2.6, fiber: 7.6, unit_weight: null },
+  "haricots rouges": { calories: 127, proteins: 8.7, carbohydrates: 22.8, fats: 0.5, fiber: 6.4, unit_weight: null },
+  "haricots blancs": { calories: 139, proteins: 9.7, carbohydrates: 25.1, fats: 0.5, fiber: 7, unit_weight: null },
+  "flageolets": { calories: 110, proteins: 7.7, carbohydrates: 19.7, fats: 0.4, fiber: 7.8, unit_weight: null },
+  "fèves": { calories: 88, proteins: 7.6, carbohydrates: 17.6, fats: 0.4, fiber: 4.2, unit_weight: null },
+  "amande": { calories: 579, proteins: 21.2, carbohydrates: 21.5, fats: 49.9, fiber: 12.5, unit_weight: 1 },
+  "amandes": { calories: 579, proteins: 21.2, carbohydrates: 21.5, fats: 49.9, fiber: 12.5, unit_weight: 1 },
+  "noix": { calories: 654, proteins: 15.2, carbohydrates: 13.7, fats: 65.2, fiber: 6.7, unit_weight: 5 },
+  "noisette": { calories: 628, proteins: 15, carbohydrates: 16.7, fats: 60.8, fiber: 9.7, unit_weight: 1 },
+  "noisettes": { calories: 628, proteins: 15, carbohydrates: 16.7, fats: 60.8, fiber: 9.7, unit_weight: 1 },
+  "cacahuète": { calories: 567, proteins: 25.8, carbohydrates: 16.1, fats: 49.2, fiber: 8.5, unit_weight: 1 },
+  "cacahuete": { calories: 567, proteins: 25.8, carbohydrates: 16.1, fats: 49.2, fiber: 8.5, unit_weight: 1 },
+  "cacahuètes": { calories: 567, proteins: 25.8, carbohydrates: 16.1, fats: 49.2, fiber: 8.5, unit_weight: 1 },
+  "noix de cajou": { calories: 553, proteins: 18.2, carbohydrates: 30.2, fats: 43.8, fiber: 3.3, unit_weight: 1.5 },
+  "pistache": { calories: 562, proteins: 20.2, carbohydrates: 27.2, fats: 45.3, fiber: 10.6, unit_weight: 1 },
+  "pistaches": { calories: 562, proteins: 20.2, carbohydrates: 27.2, fats: 45.3, fiber: 10.6, unit_weight: 1 },
+  "graines de tournesol": { calories: 584, proteins: 20.8, carbohydrates: 20, fats: 51.5, fiber: 8.6, unit_weight: null },
+  "graines de lin": { calories: 534, proteins: 18.3, carbohydrates: 28.9, fats: 42.2, fiber: 27.3, unit_weight: null },
+  "graines de chia": { calories: 486, proteins: 16.5, carbohydrates: 42.1, fats: 30.7, fiber: 34.4, unit_weight: null },
+  "sésame": { calories: 573, proteins: 17.7, carbohydrates: 23.4, fats: 49.7, fiber: 11.8, unit_weight: null },
+  "sel": { calories: 0, proteins: 0, carbohydrates: 0, fats: 0, fiber: 0, unit_weight: null },
+  "poivre": { calories: 251, proteins: 10.4, carbohydrates: 64, fats: 3.3, fiber: 25.3, unit_weight: null },
+  "moutarde": { calories: 66, proteins: 4.4, carbohydrates: 3.7, fats: 4, fiber: 4.8, unit_weight: null },
+  "ketchup": { calories: 112, proteins: 1.2, carbohydrates: 25, fats: 0.4, fiber: 0.3, unit_weight: null },
+  "mayonnaise": { calories: 680, proteins: 1.3, carbohydrates: 0.6, fats: 75, fiber: 0, unit_weight: null },
+  "sauce soja": { calories: 53, proteins: 5.6, carbohydrates: 4.9, fats: 0.1, fiber: 0.8, unit_weight: null },
+  "vinaigre": { calories: 21, proteins: 0.5, carbohydrates: 0.9, fats: 0, fiber: 0, unit_weight: null },
+  "miel": { calories: 304, proteins: 0.3, carbohydrates: 82.4, fats: 0, fiber: 0.2, unit_weight: null },
+  "sucre": { calories: 399, proteins: 0, carbohydrates: 99.8, fats: 0, fiber: 0, unit_weight: null },
+  "sirop d'érable": { calories: 260, proteins: 0, carbohydrates: 67, fats: 0.2, fiber: 0, unit_weight: null },
+  "concentré de tomate": { calories: 82, proteins: 4.3, carbohydrates: 18.9, fats: 0.5, fiber: 4.1, unit_weight: null },
+  "coulis de tomate": { calories: 39, proteins: 1.6, carbohydrates: 8.6, fats: 0.2, fiber: 1.5, unit_weight: null },
+  "basilic": { calories: 23, proteins: 3.2, carbohydrates: 2.7, fats: 0.6, fiber: 1.6, unit_weight: null },
+  "persil": { calories: 36, proteins: 3, carbohydrates: 6.3, fats: 0.8, fiber: 3.3, unit_weight: null },
+  "coriandre": { calories: 23, proteins: 2.1, carbohydrates: 3.7, fats: 0.5, fiber: 2.8, unit_weight: null },
+  "thym": { calories: 101, proteins: 5.6, carbohydrates: 24.5, fats: 1.7, fiber: 14, unit_weight: null },
+  "romarin": { calories: 131, proteins: 3.3, carbohydrates: 20.7, fats: 5.9, fiber: 14.1, unit_weight: null },
+  "origan": { calories: 265, proteins: 9, carbohydrates: 69, fats: 4.3, fiber: 42.5, unit_weight: null },
+  "cannelle": { calories: 247, proteins: 4, carbohydrates: 81, fats: 1.2, fiber: 53.1, unit_weight: null },
+  "cumin": { calories: 375, proteins: 17.8, carbohydrates: 44.2, fats: 22.3, fiber: 10.5, unit_weight: null },
+  "paprika": { calories: 282, proteins: 14.1, carbohydrates: 54, fats: 13, fiber: 34.9, unit_weight: null },
+  "curry": { calories: 325, proteins: 14.3, carbohydrates: 55.8, fats: 14, fiber: 53.2, unit_weight: null },
+  "gingembre": { calories: 80, proteins: 1.8, carbohydrates: 18, fats: 0.8, fiber: 2, unit_weight: null },
+  "curcuma": { calories: 354, proteins: 7.8, carbohydrates: 65, fats: 9.9, fiber: 21.1, unit_weight: null },
+  "chocolat noir": { calories: 546, proteins: 6.2, carbohydrates: 52.4, fats: 33.6, fiber: 8, unit_weight: null },
+  "chocolat au lait": { calories: 535, proteins: 7.6, carbohydrates: 59.4, fats: 29.7, fiber: 3.2, unit_weight: null },
+  "chocolat": { calories: 535, proteins: 7.6, carbohydrates: 59.4, fats: 29.7, fiber: 3.2, unit_weight: null },
+  "cacao": { calories: 228, proteins: 19.6, carbohydrates: 57.9, fats: 13.7, fiber: 33.2, unit_weight: null },
+  "café": { calories: 1, proteins: 0.1, carbohydrates: 0, fats: 0, fiber: 0, unit_weight: null },
+  "thé": { calories: 1, proteins: 0, carbohydrates: 0.3, fats: 0, fiber: 0, unit_weight: null },
+  "tofu": { calories: 76, proteins: 8.1, carbohydrates: 1.9, fats: 4.8, fiber: 0.3, unit_weight: null },
+  "levure": { calories: 325, proteins: 40.4, carbohydrates: 41.2, fats: 7.6, fiber: 27, unit_weight: null },
+  "gélatine": { calories: 338, proteins: 84.2, carbohydrates: 0, fats: 0.4, fiber: 0, unit_weight: null },
+  "gelatine": { calories: 338, proteins: 84.2, carbohydrates: 0, fats: 0.4, fiber: 0, unit_weight: null }
 };
 
-function guessUnitWeight(ingredientName) {
+function searchLocalNutrition(ingredientName) {
   const name = ingredientName.toLowerCase().trim();
-  return STANDARD_UNIT_WEIGHTS[name] || null;
+  
+  // Exact match
+  if (NUTRITION_DB[name]) {
+    console.log('✓ Found exact match:', name);
+    return NUTRITION_DB[name];
+  }
+  
+  // Partial match - ingredient name contains DB key or DB key contains ingredient name
+  for (const [key, value] of Object.entries(NUTRITION_DB)) {
+    if (name.includes(key) || key.includes(name)) {
+      console.log('✓ Found partial match:', key, 'for:', name);
+      return value;
+    }
+  }
+  
+  console.log('✗ No match found for:', name);
+  return null;
 }
 
 async function syncSingleIngredient(id) {
@@ -1337,25 +1478,26 @@ async function syncSingleIngredient(id) {
   if (!ing) return;
   
   showToast('🔄 Recherche en cours…');
-  const nutrition = await searchOpenFoodFacts(ing.name);
+  const nutrition = searchLocalNutrition(ing.name);
   
-  if (!nutrition || !nutrition.calories) {
-    return showToast('Aucune donnée trouvée pour "' + ing.name + '"', true);
+  if (!nutrition) {
+    return showToast('Ingrédient non trouvé dans la base (~150 ingrédients)', true);
   }
   
-  const payload = { nutrition, nutrition_updated_at: new Date().toISOString() };
+  const payload = { 
+    nutrition: {
+      calories: nutrition.calories,
+      proteins: nutrition.proteins,
+      carbohydrates: nutrition.carbohydrates,
+      fats: nutrition.fats,
+      fiber: nutrition.fiber
+    },
+    nutrition_updated_at: new Date().toISOString() 
+  };
   
-  // If unit-based ingredient and no unit_weight set, try to guess it
-  if (ing.unit === 'unité' && !ing.unit_weight) {
-    const guessedWeight = guessUnitWeight(ing.name);
-    if (guessedWeight) {
-      payload.unit_weight = guessedWeight;
-    }
-  }
-  
-  // If image URL found and no existing photo, use it
-  if (nutrition.image_url && !ing.photo_url) {
-    payload.photo_url = nutrition.image_url;
+  // Auto-set unit_weight if found and ingredient is in units
+  if (ing.unit === 'unité' && nutrition.unit_weight) {
+    payload.unit_weight = nutrition.unit_weight;
   }
   
   const { error } = await db.from('ingredients').update(payload).eq('id', id);
@@ -1365,8 +1507,8 @@ async function syncSingleIngredient(id) {
   await loadIngredients();
   renderIngredients();
   
-  const weightMsg = payload.unit_weight ? ` (poids unitaire: ${payload.unit_weight}g)` : '';
-  showToast('✓ Nutrition mise à jour pour ' + ing.name + weightMsg);
+  const weightMsg = payload.unit_weight ? ` (${payload.unit_weight}g/unité)` : '';
+  showToast('✓ Données ajoutées : ' + ing.name + weightMsg);
 }
 
 // ─────────────────────────────────────────────────────
@@ -1441,7 +1583,7 @@ async function syncAllNutrition() {
   const toSync = allIngredients.filter(i => !i.nutrition || !i.nutrition.calories);
   if (!toSync.length) return showToast('Tous les ingrédients ont déjà des données nutritionnelles', false);
   
-  if (!confirm(`Synchroniser ${toSync.length} ingrédient(s) avec Open Food Facts ?\n\n⚠️ Cela peut prendre quelques minutes.`)) return;
+  if (!confirm(`Synchroniser ${toSync.length} ingrédient(s) avec la base locale ?\n\nRecherche dans ~150 ingrédients courants français.`)) return;
   
   const progressDiv = document.getElementById('sync-progress');
   const progressBar = document.getElementById('sync-progress-bar');
@@ -1459,17 +1601,23 @@ async function syncAllNutrition() {
     progressText.textContent = `${i + 1}/${toSync.length} — ${ing.name}`;
     progressBar.style.width = `${((i + 1) / toSync.length) * 100}%`;
     
-    const nutrition = await searchOpenFoodFacts(ing.name);
+    const nutrition = searchLocalNutrition(ing.name);
     
-    if (nutrition && nutrition.calories) {
-      const payload = { nutrition, nutrition_updated_at: new Date().toISOString() };
+    if (nutrition) {
+      const payload = { 
+        nutrition: {
+          calories: nutrition.calories,
+          proteins: nutrition.proteins,
+          carbohydrates: nutrition.carbohydrates,
+          fats: nutrition.fats,
+          fiber: nutrition.fiber
+        },
+        nutrition_updated_at: new Date().toISOString() 
+      };
       
-      // If unit-based ingredient and no unit_weight set, try to guess it
-      if (ing.unit === 'unité' && !ing.unit_weight) {
-        const guessedWeight = guessUnitWeight(ing.name);
-        if (guessedWeight) {
-          payload.unit_weight = guessedWeight;
-        }
+      // Auto-set unit_weight if found and ingredient is in units
+      if (ing.unit === 'unité' && nutrition.unit_weight) {
+        payload.unit_weight = nutrition.unit_weight;
       }
       
       await db.from('ingredients').update(payload).eq('id', ing.id);
@@ -1478,8 +1626,8 @@ async function syncAllNutrition() {
       failed++;
     }
     
-    // Respecter les rate limits (max 10 req/s)
-    await new Promise(resolve => setTimeout(resolve, 150));
+    // Small delay for UI
+    await new Promise(resolve => setTimeout(resolve, 10));
   }
   
   await loadIngredients();
@@ -1489,7 +1637,7 @@ async function syncAllNutrition() {
   syncBtn.disabled = false;
   syncBtn.textContent = '🔄 Sync nutrition & prix';
   
-  showToast(`✓ Synchronisé : ${synced} | ✗ Non trouvé : ${failed}`);
+  showToast(`✓ Trouvé : ${synced} | ✗ Non trouvé : ${failed}`);
 }
 
 // ─────────────────────────────────────────────────────

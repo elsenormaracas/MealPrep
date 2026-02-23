@@ -2636,49 +2636,240 @@ async function importRecipesJSON(event) {
   const file = event.target.files[0];
   if (!file) return;
   event.target.value = '';
-  const text = await file.text();
-  let data;
-  try { data = JSON.parse(text); }
-  catch { return showToast('Fichier JSON invalide', true); }
-  if (!Array.isArray(data)) return showToast('Format incorrect', true);
-
-  let imported = 0, skipped = 0;
-  for (const rec of data) {
-    if (!rec.title) continue;
-    // Upsert ingrédients manquants par nom
-    const ingMap = {};
-    for (const ri of (rec.ingredients || [])) {
-      if (!ri.ingredient_name) continue;
-      let ing = allIngredients.find(i => i.name.toLowerCase() === ri.ingredient_name.toLowerCase());
-      if (!ing) {
-        const { data: newIng } = await db.from('ingredients')
-          .insert({ name: ri.ingredient_name, unit: ri.ingredient_unit || 'g', store: ri.ingredient_store || null })
-          .select().single();
-        if (newIng) { allIngredients.push(newIng); ing = newIng; }
-      }
-      if (ing) ingMap[ri.ingredient_id] = ing.id;
+  
+  try {
+    const text = await file.text();
+    let data;
+    
+    // Try to parse JSON
+    try {
+      data = JSON.parse(text);
+    } catch (parseError) {
+      showToast('Fichier JSON invalide : ' + parseError.message, true);
+      return;
     }
-    // Insérer la recette (sans l'id original)
-    const { id: _id, created_at: _c, ...recPayload } = rec;
-    recPayload.title = recPayload.title + ' (importé)';
-    delete recPayload.ingredients;
-    const { data: newRec, error } = await db.from('recipes').insert(recPayload).select().single();
-    if (error) { skipped++; continue; }
-    // Insérer les ingrédients
-    const riToInsert = (rec.ingredients || []).map((ri, i) => ({
-      recipe_id: newRec.id,
-      ingredient_id: ingMap[ri.ingredient_id],
-      quantity: ri.quantity, cut: ri.cut, cooking: ri.cooking, preparation: ri.preparation, sort_order: i,
-    })).filter(r => r.ingredient_id);
-    if (riToInsert.length) await db.from('recipe_ingredients').insert(riToInsert);
-    imported++;
+    
+    console.log('📥 Parsed JSON:', data);
+    
+    // Detect format and normalize to array of recipes
+    let recipes = [];
+    
+    // Format 1: Array of recipes (our export format)
+    if (Array.isArray(data)) {
+      recipes = data;
+    }
+    // Format 2: Single recipe object (from LLM)
+    else if (data.title || data.name) {
+      recipes = [data];
+    }
+    // Format 3: Object with recipes array
+    else if (data.recipes && Array.isArray(data.recipes)) {
+      recipes = data.recipes;
+    }
+    // Format 4: Object with recipe key
+    else if (data.recipe) {
+      recipes = [data.recipe];
+    }
+    else {
+      showToast('Format JSON non reconnu. Attendu: recette(s) avec "title" ou "name"', true);
+      return;
+    }
+    
+    if (!recipes.length) {
+      showToast('Aucune recette trouvée dans le fichier', true);
+      return;
+    }
+    
+    showToast(`Import de ${recipes.length} recette(s)...`);
+    let imported = 0, errors = 0;
+    
+    for (const recipe of recipes) {
+      try {
+        await importSingleRecipe(recipe);
+        imported++;
+      } catch (err) {
+        console.error('❌ Error importing recipe:', recipe.title || recipe.name, err);
+        errors++;
+      }
+    }
+    
+    await Promise.all([loadRecipes(), loadIngredients()]);
+    renderRecipes();
+    renderIngredients();
+    renderFilterTags();
+    
+    if (errors > 0) {
+      showToast(`✓ ${imported} recette(s) importée(s), ${errors} erreur(s)`);
+    } else {
+      showToast(`✓ ${imported} recette(s) importée(s)`);
+    }
+    
+  } catch (error) {
+    console.error('❌ Import error:', error);
+    showToast('Erreur : ' + error.message, true);
   }
-  await loadIngredients();
-  await loadRecipes();
-  renderIngredients();
-  renderRecipes();
-  renderFilterTags();
-  showToast(`${imported} recette(s) importée(s)${skipped ? ', ' + skipped + ' ignorée(s)' : ''} ✓`);
+}
+
+async function importSingleRecipe(recipe) {
+  // Normalize recipe data - accept multiple field names
+  const title = recipe.title || recipe.name || recipe.titre || 'Recette importée';
+  const servings = recipe.servings || recipe.serves || recipe.portions || recipe.personnes || 4;
+  const prep_time = recipe.prep_time || recipe.prepTime || recipe.preparation_time || recipe.temps_preparation || null;
+  const cook_time = recipe.cook_time || recipe.cookTime || recipe.cooking_time || recipe.temps_cuisson || null;
+  const instructions = recipe.instructions || recipe.steps || recipe.method || recipe.preparation || recipe.etapes || '';
+  const photo_url = recipe.photo_url || recipe.image || recipe.photo || recipe.image_url || null;
+  
+  // Parse tags - accept multiple formats
+  let tags = [];
+  if (Array.isArray(recipe.tags)) {
+    tags = recipe.tags.filter(t => typeof t === 'string');
+  } else if (typeof recipe.tags === 'string') {
+    tags = recipe.tags.split(',').map(t => t.trim()).filter(Boolean);
+  } else if (Array.isArray(recipe.categories)) {
+    tags = recipe.categories.filter(t => typeof t === 'string');
+  } else if (recipe.category) {
+    tags = [recipe.category];
+  }
+  
+  console.log('📝 Importing recipe:', title);
+  
+  // Insert recipe
+  const { data: newRecipe, error: recipeError } = await db
+    .from('recipes')
+    .insert({ title, servings, prep_time, cook_time, instructions, tags, photo_url })
+    .select()
+    .single();
+  
+  if (recipeError) throw recipeError;
+  
+  // Parse ingredients - accept multiple formats
+  let ingredientsList = [];
+  if (Array.isArray(recipe.ingredients)) {
+    ingredientsList = recipe.ingredients;
+  } else if (Array.isArray(recipe.recipe_ingredients)) {
+    ingredientsList = recipe.recipe_ingredients;
+  } else if (recipe.ingredient_list) {
+    ingredientsList = recipe.ingredient_list;
+  }
+  
+  console.log(`  🥕 Found ${ingredientsList.length} ingredients`);
+  
+  if (!ingredientsList.length) return; // Recipe with no ingredients is ok
+  
+  // Process each ingredient
+  for (let i = 0; i < ingredientsList.length; i++) {
+    const item = ingredientsList[i];
+    
+    // Normalize ingredient name
+    const ingName = (item.name || item.ingredient || item.nom || item.ingredient_name || '').trim();
+    if (!ingName) {
+      console.log(`  ⚠️  Skipping ingredient #${i+1}: no name`);
+      continue;
+    }
+    
+    // Parse quantity - handle string or number
+    let quantity = null;
+    if (typeof item.quantity === 'number') {
+      quantity = item.quantity;
+    } else if (typeof item.quantity === 'string') {
+      const parsed = parseFloat(item.quantity.replace(',', '.'));
+      quantity = isNaN(parsed) ? null : parsed;
+    } else if (item.amount !== undefined) {
+      quantity = typeof item.amount === 'number' ? item.amount : parseFloat(String(item.amount).replace(',', '.')) || null;
+    } else if (item.quantite !== undefined) {
+      quantity = typeof item.quantite === 'number' ? item.quantite : parseFloat(String(item.quantite).replace(',', '.')) || null;
+    }
+    
+    // Parse unit - normalize common variations
+    let unit = (item.unit || item.unite || item.measure || 'g').toLowerCase().trim();
+    
+    // Normalize unit to our standards: g, L, unité
+    const originalQuantity = quantity;
+    if (['kg', 'kilogramme', 'kilogrammes', 'kilo', 'kilos'].includes(unit)) {
+      unit = 'g';
+      if (quantity) quantity *= 1000;
+    } else if (['ml', 'millilitre', 'millilitres'].includes(unit)) {
+      unit = 'L';
+      if (quantity) quantity /= 1000;
+    } else if (['cl', 'centilitre', 'centilitres'].includes(unit)) {
+      unit = 'L';
+      if (quantity) quantity /= 100;
+    } else if (['litre', 'litres', 'l'].includes(unit)) {
+      unit = 'L';
+    } else if (['gramme', 'grammes', 'gr', 'g'].includes(unit)) {
+      unit = 'g';
+    } else if (['piece', 'pieces', 'pièce', 'pièces', 'unite', 'unites', 'unité', 'unités', 'u', 'x', 'pc', 'pcs', ''].includes(unit)) {
+      unit = 'unité';
+    } else {
+      // Unknown unit - keep as unité
+      console.log(`  ⚠️  Unknown unit "${unit}" for ${ingName}, defaulting to unité`);
+      unit = 'unité';
+    }
+    
+    // Get preparation details
+    const cut = item.cut || item.coupe || item.cutting || null;
+    const cooking = item.cooking || item.cuisson || item.cook_method || null;
+    const preparation = item.preparation || item.prep || item.note || null;
+    
+    console.log(`  + ${ingName}: ${quantity}${unit}${cut ? ' ('+cut+')' : ''}${cooking ? ' ['+cooking+']' : ''}`);
+    
+    // Find or create ingredient
+    let ingredient = allIngredients.find(i => i.name.toLowerCase() === ingName.toLowerCase());
+    
+    if (!ingredient) {
+      console.log(`    → Creating new ingredient: ${ingName}`);
+      
+      const { data: newIng, error: ingError } = await db
+        .from('ingredients')
+        .insert({ name: ingName, unit, store: null })
+        .select()
+        .single();
+      
+      if (ingError) {
+        console.error('    ❌ Error creating ingredient:', ingError);
+        continue;
+      }
+      
+      ingredient = newIng;
+      allIngredients.push(newIng);
+      
+      // Try to auto-fill nutrition from local DB
+      const nutrition = searchLocalNutrition(ingName);
+      if (nutrition) {
+        console.log(`    ✓ Auto-filled nutrition for ${ingName}`);
+        
+        const nutritionPayload = {
+          nutrition: {
+            calories: nutrition.calories,
+            proteins: nutrition.proteins,
+            carbohydrates: nutrition.carbohydrates,
+            fats: nutrition.fats,
+            fiber: nutrition.fiber
+          },
+          nutrition_updated_at: new Date().toISOString()
+        };
+        
+        if (unit === 'unité' && nutrition.unit_weight) {
+          nutritionPayload.unit_weight = nutrition.unit_weight;
+        }
+        
+        await db.from('ingredients').update(nutritionPayload).eq('id', ingredient.id);
+      }
+    }
+    
+    // Insert recipe_ingredient
+    await db.from('recipe_ingredients').insert({
+      recipe_id: newRecipe.id,
+      ingredient_id: ingredient.id,
+      quantity,
+      cut,
+      cooking,
+      preparation,
+      sort_order: i
+    });
+  }
+  
+  console.log(`✓ Recipe "${title}" imported successfully`);
 }
 
 // ─────────────────────────────────────────────────────

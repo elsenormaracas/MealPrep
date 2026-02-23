@@ -2813,8 +2813,8 @@ async function importSingleRecipe(recipe) {
     
     console.log(`  + ${ingName}: ${quantity}${unit}${cut ? ' ('+cut+')' : ''}${cooking ? ' ['+cooking+']' : ''}`);
     
-    // Find or create ingredient
-    let ingredient = allIngredients.find(i => i.name.toLowerCase() === ingName.toLowerCase());
+    // Find ingredient with fuzzy matching to avoid duplicates
+    let ingredient = findIngredientFuzzy(ingName);
     
     if (!ingredient) {
       console.log(`    → Creating new ingredient: ${ingName}`);
@@ -2855,6 +2855,8 @@ async function importSingleRecipe(recipe) {
         
         await db.from('ingredients').update(nutritionPayload).eq('id', ingredient.id);
       }
+    } else {
+      console.log(`    ✓ Found existing: "${ingredient.name}" (matched with "${ingName}")`);
     }
     
     // Insert recipe_ingredient
@@ -2870,6 +2872,159 @@ async function importSingleRecipe(recipe) {
   }
   
   console.log(`✓ Recipe "${title}" imported successfully`);
+}
+
+// ─────────────────────────────────────────────────────
+// FUZZY INGREDIENT MATCHING (avoid duplicates)
+// ─────────────────────────────────────────────────────
+
+// Synonym dictionary for common ingredient variations
+const INGREDIENT_SYNONYMS = {
+  // Pâtes & grains
+  "plaque lasagne": ["pate lasagne", "feuille lasagne", "lasagne"],
+  "pate lasagne": ["plaque lasagne", "feuille lasagne", "lasagne"],
+  "feuille lasagne": ["pate lasagne", "plaque lasagne", "lasagne"],
+  
+  // Viandes
+  "viande hache": ["steak hache", "boeuf hache", "hache"],
+  "steak hache": ["viande hache", "boeuf hache", "hache"],
+  "blanc poulet": ["filet poulet", "escalope poulet", "poulet"],
+  "filet poulet": ["blanc poulet", "escalope poulet", "poulet"],
+  
+  // Légumes
+  "tomate cerise": ["tomate", "tomate cocktail"],
+  "tomate cocktail": ["tomate", "tomate cerise"],
+  "oignon blanc": ["oignon", "oignon jaune"],
+  "oignon rouge": ["oignon", "oignon jaune"],
+  "oignon jaune": ["oignon", "oignon blanc"],
+  
+  // Fromages
+  "fromage rape": ["emmental rape", "gruyere rape", "emmental", "gruyere"],
+  "emmental rape": ["fromage rape", "gruyere rape"],
+  "gruyere rape": ["fromage rape", "emmental rape"],
+  "fromage chevre": ["chevre", "buche chevre", "fromage"],
+  "buche chevre": ["fromage chevre", "chevre"],
+  
+  // Crème & lait
+  "creme fraiche": ["creme liquide", "creme"],
+  "creme liquide": ["creme fraiche", "creme"],
+  "lait entier": ["lait", "lait demi ecreme"],
+  "lait demi ecreme": ["lait", "lait entier"],
+  
+  // Huiles
+  "huile olive": ["huile", "huile d'olive"],
+  "huile tournesol": ["huile", "huile de tournesol"],
+  "huile colza": ["huile", "huile de colza"],
+  
+  // Herbes & épices
+  "herbe provence": ["herbe", "melange herbe"],
+  "basilic frais": ["basilic"],
+  "persil frais": ["persil"],
+  "coriandre frais": ["coriandre"],
+  
+  // Autres
+  "pate feuillete": ["pate", "feuillete"],
+  "pate brise": ["pate", "brise"],
+  "pate sable": ["pate", "sable"],
+  "concentre tomate": ["coulis tomate", "puree tomate"],
+  "coulis tomate": ["concentre tomate", "puree tomate"],
+  "puree tomate": ["concentre tomate", "coulis tomate"]
+};
+
+function findIngredientFuzzy(searchName) {
+  const search = normalizeIngredientName(searchName);
+  
+  // 1. Exact match (normalized)
+  for (const ing of allIngredients) {
+    if (normalizeIngredientName(ing.name) === search) {
+      return ing;
+    }
+  }
+  
+  // 2. Synonym match
+  const synonyms = INGREDIENT_SYNONYMS[search] || [];
+  for (const ing of allIngredients) {
+    const ingNorm = normalizeIngredientName(ing.name);
+    if (synonyms.includes(ingNorm)) {
+      console.log(`    🔗 Synonym match: "${search}" → "${ingNorm}"`);
+      return ing;
+    }
+    // Check reverse (if existing ingredient is in search's synonyms)
+    const ingSynonyms = INGREDIENT_SYNONYMS[ingNorm] || [];
+    if (ingSynonyms.includes(search)) {
+      console.log(`    🔗 Synonym match: "${search}" ← "${ingNorm}"`);
+      return ing;
+    }
+  }
+  
+  // 3. Very close match (Levenshtein distance <= 2)
+  for (const ing of allIngredients) {
+    const distance = levenshteinDistance(search, normalizeIngredientName(ing.name));
+    if (distance <= 2) {
+      console.log(`    📏 Close match (distance=${distance}): "${search}" ≈ "${normalizeIngredientName(ing.name)}"`);
+      return ing;
+    }
+  }
+  
+  // 4. Contains match (one contains the other)
+  for (const ing of allIngredients) {
+    const ingNorm = normalizeIngredientName(ing.name);
+    if (search.includes(ingNorm) || ingNorm.includes(search)) {
+      // Make sure it's not a completely different word
+      if (Math.abs(search.length - ingNorm.length) <= 10) {
+        console.log(`    📦 Contains match: "${search}" ⊃ "${ingNorm}"`);
+        return ing;
+      }
+    }
+  }
+  
+  return null;
+}
+
+function normalizeIngredientName(name) {
+  return name.toLowerCase()
+    .trim()
+    // Remove accents
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    // Remove apostrophes and special chars
+    .replace(/[''']/g, ' ')
+    .replace(/[^\w\s]/g, ' ')
+    // Remove plural 's'
+    .replace(/\bs\b/g, '')
+    // Remove common prefixes/suffixes and articles
+    .replace(/\b(de|d|le|la|les|un|une|des|du|a|au|aux)\b/g, '')
+    .replace(/\b(frais|fraiche|seche|sec|seches|entier|entiere|rape|rapes|cru|crus|cuite|cuites)\b/g, '')
+    // Collapse multiple spaces
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function levenshteinDistance(a, b) {
+  const matrix = [];
+  
+  for (let i = 0; i <= b.length; i++) {
+    matrix[i] = [i];
+  }
+  
+  for (let j = 0; j <= a.length; j++) {
+    matrix[0][j] = j;
+  }
+  
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1, // substitution
+          matrix[i][j - 1] + 1,     // insertion
+          matrix[i - 1][j] + 1      // deletion
+        );
+      }
+    }
+  }
+  
+  return matrix[b.length][a.length];
 }
 
 // ─────────────────────────────────────────────────────

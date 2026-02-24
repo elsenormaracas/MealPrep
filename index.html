@@ -2203,13 +2203,34 @@ function generateBatch() {
   const weekMeals = allMealPlan.filter(m => weekISOs.includes(m.date) && m.recipe);
   if (!weekMeals.length) return showToast('Aucun repas planifié cette semaine', true);
 
-  // Global combined steps
+  // List of ingredients to ignore in batch cooking (seasonings, condiments, dressage)
+  const IGNORED_INGREDIENTS = [
+    'sel', 'poivre', 'muscade', 'paprika', 'cumin', 'curry', 'cannelle', 
+    'thym', 'romarin', 'basilic', 'persil', 'coriandre', 'origan', 'herbe',
+    'moutarde', 'ketchup', 'mayonnaise', 'sauce soja', 'vinaigre',
+    'sucre', 'miel', 'sirop',
+    'huile', 'beurre', 'margarine',
+    'levure', 'bicarbonate', 'levain'
+  ];
+  
+  const shouldIgnoreIngredient = (ingName) => {
+    const name = ingName.toLowerCase();
+    return IGNORED_INGREDIENTS.some(ignored => name.includes(ignored));
+  };
+
+  // Global combined steps - filter out condiments and seasonings
   const combined = {};
   weekMeals.forEach(meal => {
     const recipe = allRecipes.find(r => r.id === meal.recipe_id);
     if (!recipe) return;
     const ratio = meal.servings / recipe.servings;
     allRecipeIngredients.filter(ri => ri.recipe_id === recipe.id).forEach(ri => {
+      const ing = allIngredients.find(i => i.id === ri.ingredient_id);
+      if (!ing || shouldIgnoreIngredient(ing.name)) return; // Skip condiments
+      
+      // Only include if there's actual preparation work (cut, cooking, or preparation)
+      if (!ri.cut && !ri.cooking && !ri.preparation) return;
+      
       const key = `${ri.ingredient_id}|${ri.cut||''}|${ri.cooking||''}|${ri.preparation||''}`;
       if (!combined[key]) combined[key] = { ...ri, quantity: 0 };
       combined[key].quantity += (ri.quantity || 0) * ratio;
@@ -2261,7 +2282,7 @@ function generateBatch() {
 
   const globalSteps = generateRecipeText(Object.values(combined));
 
-  // Per-recipe blocks
+  // Per-recipe blocks - also filter out condiments
   const uniqueRecipeIds = [...new Set(weekMeals.map(m => m.recipe_id))];
   const recipeBlocks = uniqueRecipeIds.map(recipeId => {
     const recipe      = allRecipes.find(r => r.id === recipeId);
@@ -2271,6 +2292,12 @@ function generateBatch() {
     meals.forEach(meal => {
       const ratio = meal.servings / recipe.servings;
       allRecipeIngredients.filter(ri => ri.recipe_id === recipeId).forEach(ri => {
+        const ing = allIngredients.find(i => i.id === ri.ingredient_id);
+        if (!ing || shouldIgnoreIngredient(ing.name)) return; // Skip condiments
+        
+        // Only include if there's actual preparation work
+        if (!ri.cut && !ri.cooking && !ri.preparation) return;
+        
         const key = `${ri.ingredient_id}|${ri.cut||''}|${ri.cooking||''}|${ri.preparation||''}`;
         if (!recCombined[key]) recCombined[key] = { ...ri, quantity: 0 };
         recCombined[key].quantity += (ri.quantity || 0) * ratio;
@@ -2354,11 +2381,15 @@ function generateBatch() {
     <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px">${mealsList}</div>
     ${weekNutritionHTML}
     
-    <div class="batch-subtitle" style="margin-top:0">🔀 Toutes les étapes combinées</div>
+    <div class="batch-subtitle" style="margin-top:0">🔀 Préparations et cuissons à l'avance</div>
+    <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:14px;font-style:italic">
+      Liste des légumes, légumineuses et ingrédients principaux à préparer.<br>
+      Les assaisonnements, condiments et huiles sont exclus pour se concentrer sur l'essentiel.
+    </div>
     
     <div style="background:var(--green-xpale);border:1px solid var(--border);border-radius:var(--radius-sm);padding:15px;margin-bottom:12px">
-      <div style="font-weight:700;font-size:0.9rem;color:var(--green);margin-bottom:10px">📦 Ingrédients nécessaires</div>
-      ${ingredientsHTML}
+      <div style="font-weight:700;font-size:0.9rem;color:var(--green);margin-bottom:10px">📦 Ingrédients à préparer</div>
+      ${ingredientsHTML || '<div style="color:var(--text-muted);font-style:italic">Aucune préparation spécifique détectée</div>'}
     </div>
     
     <div style="font-weight:700;font-size:0.85rem;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.04em">Étapes de préparation</div>
